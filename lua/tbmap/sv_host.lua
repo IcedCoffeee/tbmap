@@ -4,11 +4,34 @@ local cfg = TBMap.Config
 local World = TBMap.World or {}
 TBMap.World = World
 
--- The host map the loaded world belongs to. A convar rather than a file because it has to outlive the
--- Lua reload a changelevel does and not outlive the process: with no archive flag a fresh server reads
--- it empty, so nothing auto-loads on a restart, and only a changelevel to the same map still matches.
-local autoload = GetConVar("tbmap_autoload") or CreateConVar("tbmap_autoload", "",
-	FCVAR_NONE, "Host map the loaded TrenchBroom world belongs to")
+-- The host map the loaded world belongs to, on disk because a changelevel throws the whole Lua state
+-- away, so nothing in memory survives it. The process boot time is stored beside the map to tell a
+-- changelevel from a restart: wall clock minus engine uptime is constant for the life of a process and
+-- jumps by the downtime across one, so a marker this process did not write is discarded and a fresh
+-- server auto-loads nothing.
+local AUTO_FILE = "tbmap/autoload.txt"
+
+local function BootTime()
+	return os.time() - SysTime()
+end
+
+local function WriteAutoMarker()
+	file.CreateDir("tbmap")
+	file.Write(AUTO_FILE, util.TableToJSON({ map = game.GetMap(), boot = BootTime() }))
+end
+
+local function ClearAutoMarker()
+	file.Delete(AUTO_FILE)
+end
+
+local function AutoMarkerMatches()
+	local text = file.Read(AUTO_FILE, "DATA")
+	local marker = text and util.JSONToTable(text)
+
+	if not marker or marker.map ~= game.GetMap() then return false end
+
+	return math.abs((marker.boot or 0) - BootTime()) <= 2
+end
 
 -- Everything a loaded map is made of. Reset removes the entities of the world being replaced and
 -- empties the table, so a reload ends up where a load does rather than leaving a world behind; the
@@ -798,7 +821,7 @@ function TBMap.Load()
 
 	-- From here the world belongs to this host map, so a changelevel back into it auto-loads and a jump
 	-- to any other does not.
-	autoload:SetString(game.GetMap())
+	WriteAutoMarker()
 
 	-- Keyed by cell, because a cell that falls back to a mesh would otherwise claim the whole map on
 	-- its own.
@@ -843,11 +866,11 @@ function TBMap.Load()
 end
 
 -- Auto-load only where the world already belongs to the host map being entered: a changelevel to a
--- different map clears the marker and loads nothing, and a restart finds it empty, so after one the
--- world is loaded on demand rather than restored.
+-- different map clears the marker and loads nothing, and a marker written by another process (a
+-- restart) is refused too, so after one the world is loaded on demand rather than restored.
 hook.Add("InitPostEntity", "tbmap_load", function()
-	if autoload:GetString() ~= game.GetMap() then
-		autoload:SetString("")
+	if not AutoMarkerMatches() then
+		ClearAutoMarker()
 		return
 	end
 
@@ -910,7 +933,7 @@ util.AddNetworkString("tbmap_unload")
 concommand.Add("tbmap_unload", function(ply)
 	if IsValid(ply) and not ply:IsSuperAdmin() then return end
 
-	autoload:SetString("")
+	ClearAutoMarker()
 	TBMap.ResetWorld()
 
 	net.Start("tbmap_unload")
