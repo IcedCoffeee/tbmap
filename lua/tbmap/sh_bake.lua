@@ -106,17 +106,6 @@ local function ShadowTrace(fx, fy, fz, tx, ty, tz)
 	return ShadowRay(fx, fy, fz, dx / length, dy / length, dz / length, length)
 end
 
--- A real hit test, not a threshold on the openness fraction: a sun ray spans the whole map, so a hit a
--- metre away still comes back 99.9% clear.
-local function Blocked(fx, fy, fz, tx, ty, tz, bias)
-	local hit, startSolid, distance = ShadowTrace(fx, fy, fz, tx, ty, tz)
-	if not hit then return false end
-
-	if startSolid then return true end
-
-	return distance >= (bias or cfg.ShadowBias)
-end
-
 -- The base every surface starts from, and the whole of the lighting for anything the sun cannot reach
 -- that has no lamp on it. A map with a light_environment gets that entity's _ambient.
 function Bake.Ambient()
@@ -300,8 +289,10 @@ local function TraceLampNodes(s, normal, lamps, count)
 				-- nothing. On a map with hundreds of lights, most of a face's lattice is out of reach of
 				-- most of its candidates, and this is where that is paid.
 				if dx * dx + dy * dy + dz * dz < reach then
-					grid[base + gx + 1] = Blocked(px + startX, py + startY, pz + startZ,
-						pos.x, pos.y, pos.z) and 0 or 1
+					-- The node is offset along its surface normal, so its own surface is behind the ray
+					-- and anything met is in front: a hit is the answer, at any distance.
+					local hit = ShadowTrace(px + startX, py + startY, pz + startZ, pos.x, pos.y, pos.z)
+					grid[base + gx + 1] = hit and 0 or 1
 				else
 					grid[base + gx + 1] = 0
 				end
@@ -776,20 +767,6 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 		local t1x, t1y, t1z = s.t1.x, s.t1.y, s.t1.z
 		local t2x, t2y, t2z = s.t2.x, s.t2.y, s.t2.z
 		local rows = s.height - 2 * margin
-		local pu, pw = {}, {}
-
-		-- The face's own two dimensions, once, so the rows below only scan edges.
-		local poly, n = plan.face.poly, #plan.face.poly
-
-		for i = 1, n do
-			local v = poly[i]
-			local dx, dy, dz = v.x - ox, v.y - oy, v.z - oz
-
-			pu[i] = dx * t1x + dy * t1y + dz * t1z
-			pw[i] = dx * t2x + dy * t2y + dz * t2z
-		end
-
-		plan.pu, plan.pw = pu, pw
 
 		TBMap.Probe.Start("bake.cells")
 
@@ -814,6 +791,10 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 			polyCount = polyCount + 1
 			polys[polyCount] = { u = qu, w = qw, n = pn }
 		end
+
+		-- Kept so the sun's off-surface snap can answer with the nearest point on the surface this face
+		-- draws, rather than the nearest point on the whole face's plane.
+		plan.pieces, plan.pieceCount = polys, polyCount
 
 		local loOf, hiOf = {}, {}
 
@@ -919,17 +900,70 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 			facing = nx * sdx + ny * sdy + nz * sdz
 		end
 
-		local startOffset, rayLength, rayBias = cfg.TraceStartOffset, cfg.ShadowRayLength, cfg.ShadowBias
+		local startOffset, rayLength = cfg.TraceStartOffset, cfg.ShadowRayLength
 		local cells = cellsOf[plan.planeKey]
 		local blockU, blockW
 
-		local function TraceSun(px0, px1, py0, py1)
-			local ox, oy, oz = s.origin.x, s.origin.y, s.origin.z
-			local t1x, t1y, t1z = s.t1.x, s.t1.y, s.t1.z
-			local t2x, t2y, t2z = s.t2.x, s.t2.y, s.t2.z
-			local uStart, vStart, unit = s.uStart, s.vStart, s.unit
-			local pu, pw, pn = plan.pu, plan.pw, #plan.pu
+		-- The face's frame, read once: the trace and the snap both work in these two dimensions.
+		local ox, oy, oz = s.origin.x, s.origin.y, s.origin.z
+		local t1x, t1y, t1z = s.t1.x, s.t1.y, s.t1.z
+		local t2x, t2y, t2z = s.t2.x, s.t2.y, s.t2.z
+		local uStart, vStart, unit = s.uStart, s.vStart, s.unit
+		local pieces, pieceCount = plan.pieces, plan.pieceCount or 0
 
+		-- One shadow ray from a point on the plane, offset along the normal. On numbers rather than
+		-- Vectors: this is the bake's innermost loop and a Vector here is a heap allocation.
+		local function SunAt(su, sw)
+			if facing <= 0 then return 0 end
+
+			local fx = ox + t1x * su + t2x * sw + nx * startOffset
+			local fy = oy + t1y * su + t2y * sw + ny * startOffset
+			local fz = oz + t1z * su + t2z * sw + nz * startOffset
+			local hit, solid = ShadowRay(fx, fy, fz, sdx, sdy, sdz, rayLength)
+
+			-- The ray is offset along the normal and facing outward, so nothing it meets is this face's
+			-- own surface: a hit is in front of it, at whatever distance, and occludes.
+			if solid or hit then return 0 end
+
+			return 1
+		end
+
+		-- The nearest point on the surface this face draws, the pieces rather than the whole face's
+		-- plane: a node under a wall borders that wall, not the face's far edge, so the value it takes is
+		-- the contact's own and not the lighting of somewhere else on the face.
+		local function SnapToFace(u, w)
+			local best, su, sw = math.huge, u, w
+
+			for p = 1, pieceCount do
+				local qu, qw, qn = pieces[p].u, pieces[p].w, pieces[p].n
+
+				for i = 1, qn do
+					local j = i % qn + 1
+					local au, aw = qu[i], qw[i]
+					local eu, ew = qu[j] - au, qw[j] - aw
+					local l2 = eu * eu + ew * ew
+					local t = 0
+
+					if l2 > 0 then
+						t = ((u - au) * eu + (w - aw) * ew) / l2
+
+						if t < 0 then t = 0 elseif t > 1 then t = 1 end
+					end
+
+					local quu, qww = au + eu * t, aw + ew * t
+					local du, dw = u - quu, w - qww
+					local d2 = du * du + dw * dw
+
+					if d2 < best then
+						best, su, sw = d2, quu, qww
+					end
+				end
+			end
+
+			return su, sw
+		end
+
+		local function TraceSun(px0, px1, py0, py1)
 			TBMap.Probe.Start("sun.trace")
 			Bake.traced = Bake.traced + (px1 - px0 + 1) * (py1 - py0 + 1)
 
@@ -943,47 +977,14 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 
 					-- A sample off this plane's own surface has run off the end of the wall or around a
 					-- corner, and what it would see there is the next plane over or the open sky. The
-					-- face's nearest point is the answer, which is what keeps edges from rimming.
+					-- face's nearest point is the answer, which is what keeps edges from rimming. The
+					-- tracer reads leaving that surface as clear and entering it as a shadow, so a sample
+					-- at a contact takes the value of the sun on that side rather than a bare dark.
 					if (cells.marks[math.floor(u / unit) - cells.cu + cw * cells.stride] or 0) <= 0 then
-						local best = math.huge
-
-						for i = 1, pn do
-							local j = i % pn + 1
-							local au, aw = pu[i], pw[i]
-							local eu, ew = pu[j] - au, pw[j] - aw
-							local l2 = eu * eu + ew * ew
-							local t = 0
-
-							if l2 > 0 then
-								t = ((u - au) * eu + (w - aw) * ew) / l2
-
-								if t < 0 then t = 0 elseif t > 1 then t = 1 end
-							end
-
-							local qu, qw = au + eu * t, aw + ew * t
-							local du, dw = u - qu, w - qw
-							local d2 = du * du + dw * dw
-
-							if d2 < best then
-								best, su, sw = d2, qu, qw
-							end
-						end
+						su, sw = SnapToFace(u, w)
 					end
 
-					local fx = ox + t1x * su + t2x * sw + nx * startOffset
-					local fy = oy + t1y * su + t2y * sw + ny * startOffset
-					local fz = oz + t1z * su + t2z * sw + nz * startOffset
-					local vis = 0
-
-					if facing > 0 then
-						local hit, solid, distance = ShadowRay(fx, fy, fz, sdx, sdy, sdz, rayLength)
-
-						if not solid and (not hit or distance < rayBias) then
-							vis = 1
-						end
-					end
-
-					sun[py * pcols + px + 1] = vis
+					sun[py * pcols + px + 1] = SunAt(su, sw)
 				end
 			end
 

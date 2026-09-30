@@ -153,7 +153,11 @@ local function Walk(fx, fy, fz, dx, dy, dz, length)
 					if tmin > tmax then break end
 				end
 
-				if tmin <= tmax and tmin < best then best = tmin end
+				-- A brush the ray is only leaving is behind the origin: its interval ahead has no length,
+				-- so a sample sitting on a surface it walks away from does not shadow itself. A brush the
+				-- ray enters starts at the origin and has length ahead, which is a contact with a wall and
+				-- has to read as shadow.
+				if tmin <= tmax and tmax - tmin > 1e-3 and tmin < best then best = tmin end
 			end
 		end
 

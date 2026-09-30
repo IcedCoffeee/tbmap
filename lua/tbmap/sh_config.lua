@@ -151,8 +151,9 @@ TBMap.Config = {
 	ShadowSoftness = 2,
 	-- How far a shadow ray reaches: long enough to leave the map and find sky.
 	ShadowRayLength = 8192,
-	-- Hits closer than this count as the texel's own surface rather than a shadow, or every edge
-	-- sample reads as occluded.
+	-- How close the cover's centre ray may hit before the hit stops counting as proof the grid is not
+	-- lit. The sample traces need no tolerance: each starts offset along its surface's normal and facing
+	-- outward, so its own surface is behind it and nothing met has to be excused.
 	ShadowBias = 2,
 
 	-- Falloff radius for a lamp that does not specify one, and the scale that brings Source's
