@@ -15,6 +15,12 @@ ENT.RenderGroup = RENDERGROUP_BOTH
 function ENT:Draw() end
 function ENT:DrawTranslucent() end
 
+-- The world's collision lives on this entity and the client rebuilds it from the payload, so the
+-- engine's own entity cleanup has to leave it alone rather than take the collision with it.
+function ENT:Initialize()
+	self:AddEFlags(EFL_KEEP_ON_RECREATE_ENTITIES)
+end
+
 -- Which collision cell this entity carries. Both realms bucket the convexes the same way, and the
 -- client attaches each bucket to the entity bearing its index.
 function ENT:SetupDataTables()

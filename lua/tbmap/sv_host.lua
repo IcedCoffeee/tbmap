@@ -4,6 +4,12 @@ local cfg = TBMap.Config
 local World = TBMap.World or {}
 TBMap.World = World
 
+-- The host map the loaded world belongs to. A convar rather than a file because it has to outlive the
+-- Lua reload a changelevel does and not outlive the process: with no archive flag a fresh server reads
+-- it empty, so nothing auto-loads on a restart, and only a changelevel to the same map still matches.
+local autoload = GetConVar("tbmap_autoload") or CreateConVar("tbmap_autoload", "",
+	FCVAR_NONE, "Host map the loaded TrenchBroom world belongs to")
+
 -- Everything a loaded map is made of. Reset removes the entities of the world being replaced and
 -- empties the table, so a reload ends up where a load does rather than leaving a world behind; the
 -- table survives a code reload, which is what lets this find the previous world's entities.
@@ -790,6 +796,10 @@ function TBMap.Load()
 
 	if not TBMap.Build() then return end
 
+	-- From here the world belongs to this host map, so a changelevel back into it auto-loads and a jump
+	-- to any other does not.
+	autoload:SetString(game.GetMap())
+
 	-- Keyed by cell, because a cell that falls back to a mesh would otherwise claim the whole map on
 	-- its own.
 	local soup = {}
@@ -832,7 +842,15 @@ function TBMap.Load()
 	end
 end
 
+-- Auto-load only where the world already belongs to the host map being entered: a changelevel to a
+-- different map clears the marker and loads nothing, and a restart finds it empty, so after one the
+-- world is loaded on demand rather than restored.
 hook.Add("InitPostEntity", "tbmap_load", function()
+	if autoload:GetString() ~= game.GetMap() then
+		autoload:SetString("")
+		return
+	end
+
 	TBMap.Load()
 end)
 
@@ -883,4 +901,20 @@ concommand.Add("tbmap_reload", function(ply, _, args)
 	if IsValid(ply) and not ply:IsSuperAdmin() then return end
 
 	TBMap.Load()
+end)
+
+util.AddNetworkString("tbmap_unload")
+
+-- Removes the world from the server and tells every client to drop what it drew of it, and stops it
+-- following the host map: a later changelevel into this map will not bring it back.
+concommand.Add("tbmap_unload", function(ply)
+	if IsValid(ply) and not ply:IsSuperAdmin() then return end
+
+	autoload:SetString("")
+	TBMap.ResetWorld()
+
+	net.Start("tbmap_unload")
+	net.Broadcast()
+
+	print("[tbmap] unloaded")
 end)

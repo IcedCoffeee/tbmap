@@ -1055,6 +1055,13 @@ TBMap.Stream.Receive("tbmap_stream", function(_, _, data)
 	TBMap.BuildMeshes(payload, light)
 end)
 
+-- The server took the world down: drop the meshes and the atlas, and the decoded world with them, so
+-- nothing is left behind to rebuild collision from.
+net.Receive("tbmap_unload", function()
+	TBMap.ResetWorld()
+	TBMap.ClearClientMeshes(false)
+end)
+
 -- A full update removes the collision entities on the client and re-creates them (the second argument
 -- of GM:EntityRemoved marks one), and the physics built on them goes with them. OnEntityCreated cannot
 -- put it back: it runs before the entity's class name is set, so a class filter can miss the entity
