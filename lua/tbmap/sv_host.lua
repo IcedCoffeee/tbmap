@@ -244,7 +244,8 @@ function TBMap.ParseSpawns(entities)
 end
 
 -- A real entity per point, because the spawn hook returns one and the engine reads its position and
--- angles. Removed with the rest of the world on the next load.
+-- angles. Flagged like the collision entities so game.CleanUpMap leaves it, and removed with the rest
+-- of the world on the next load or unload.
 function TBMap.CreateSpawns()
 	for _, ent in ipairs(World.SpawnEntities or {}) do
 		if IsValid(ent) then ent:Remove() end
@@ -256,6 +257,7 @@ function TBMap.CreateSpawns()
 		local ent = ents.Create("info_player_start")
 
 		if IsValid(ent) then
+			ent:AddEFlags(EFL_KEEP_ON_RECREATE_ENTITIES)
 			ent:SetPos(spawn.pos)
 			ent:SetAngles(Angle(0, spawn.yaw, 0))
 			ent:Spawn()
