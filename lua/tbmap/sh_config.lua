@@ -3,54 +3,57 @@
 TBMap = TBMap or {}
 
 TBMap.Config = {
-	-- What to load, and where from.
+	-- The map file to load on startup, relative to SearchPath.
 	StartupMap = "tbmap/test.map",
 	-- "DATA" reads garrysmod/data/, "GAME" reads the game or addon folder.
 	SearchPath = "DATA",
-	-- Reload when the file changes on disk, so saving in TrenchBroom is the whole loop.
+	-- Reload when the file changes on disk, so saving in TrenchBroom reloads the map.
 	ReloadOnFileChange = true,
 
 	-- Who may push a map to the server, by SteamID64. Empty means superadmins only.
 	AllowedEditors = {},
-	-- An upload larger than this is refused. netstream's own ceiling is 64 MB.
+	-- Refuse an upload larger than this, in KB.
 	MaxUploadKB = 16384,
 
-	-- Geometry. A face steeper than FaceUpThreshold counts as a wall; flatter ones are floors or
-	-- ceilings by the sign of their normal.
+	-- How close two points must be, in world units, to count as one. Raising it welds geometry that
+	-- should be separate; lowering it leaves hairline cracks.
 	GeometryTolerance = 0.01,
+	-- A face whose normal rises more steeply than this counts as a floor or ceiling; the rest are walls.
 	FaceUpThreshold = 0.7,
-	-- Matching collision on the client, so movement prediction lines up with the server.
+	-- Build the same collision on the client so movement prediction matches the server.
 	ClientSideCollision = true,
-	-- Collision is built in cubes of this many units, one physics object each, rather than one object
-	-- per realm: a map-wide object is where the solver and 32 bit clients fall over.
+	-- Collision is one physics object per cube this many units across. Smaller cubes suit large maps and
+	-- 32 bit clients; larger cubes use fewer objects.
 	CollisionChunkSize = 1024,
+	-- The material the world's collision reports, for footstep and impact sounds.
 	SurfaceProp = "concrete",
 
-	-- What to texture a face with when the name it carries is not a material on this client. Tried
-	-- in order, by the direction the face points.
+	-- The texture a face falls back to when its own name is not a material on this client, by the
+	-- direction the face points. Each list is tried in order.
 	FallbackMaterials = {
 		floor   = { "gm_construct/construct_concrete_ground", "concrete/concretefloor012a" },
 		wall    = { "plaster/plasterwall022c", "plaster/plasterwall017a", "concrete/concretewall014a" },
 		ceiling = { "concrete/concreteceiling001a", "concrete/concretefloor012a" },
 	},
-	-- The checkerboard drawn when that fails too, coloured by the direction the face points.
+	-- The checkerboard drawn when none of those resolve, coloured by the direction the face points.
 	MissingTextureColor = {
 		floor   = Color(120, 120, 130),
 		ceiling = Color(90, 90, 100),
 		wall    = Color(150, 150, 140),
 	},
-	-- Texel size assumed for that checkerboard. Affects UVs only.
+	-- Texel size assumed for that checkerboard; affects only how its UVs scale.
 	MissingTextureSize = 64,
 
-	-- What each tool texture means to the loader, by its lowered name. A brush is a sky or a clip
-	-- brush only when every face of it names one; anything else is drawn geometry with its tool
-	-- faces dropped one at a time.
+	-- What each tool texture does, by its lowered name:
 	--
 	--   sky        invisible and solid, light passes through
 	--   clip       invisible and solid, light passes through
 	--   nodraw     not drawn, solid, blocks light
 	--   blocklight casts a shadow and nothing else: no collision
 	--   ignore     triggers, hints, skips, portals: neither drawn nor solid
+	--
+	-- A brush is sky or clip only when every face of it is; anything else is drawn, with its tool faces
+	-- dropped one at a time.
 	ToolTextures = {
 		["tools/toolsskybox"] = "sky",
 		["tools/toolsskybox2d"] = "sky",
@@ -78,10 +81,9 @@ TBMap.Config = {
 		["tools/toolsfogvolume"] = "ignore",
 	},
 
-	-- The material's own compile flags, in priority order. A brush carrying more than one takes
-	-- the first of these, which is why sky comes before the rest: a converted sky ceiling is one
-	-- toolsskybox face and the remainder toolsnodraw, and read as nodraw it seals the roof and the
-	-- map goes unlit.
+	-- Compile flags to look for in the material file, in priority order: the first that matches decides
+	-- the kind. Order matters, because a converted sky ceiling is one sky face and the rest nodraw, and
+	-- read as nodraw it seals the roof and leaves the map unlit.
 	CompileFlagKinds = {
 		{ "%compilesky", "sky" },
 		{ "%compile2dsky", "sky" },
@@ -100,80 +102,72 @@ TBMap.Config = {
 		{ "%compileblocklos", "ignore" },
 	},
 
-	-- The bake. One rectangle per face in a shared atlas, at this many world units per texel. This
-	-- is the resolution of everything: a shadow edge is as crisp as this, and halving it quadruples
-	-- the work. Sixteen is roughly what Quake used.
+	-- World units per lightmap texel. This is the resolution of all baked light: smaller gives sharper
+	-- shadows and a heavier bake, and halving it quadruples the work.
 	LightmapTexelSize = 16,
+	-- Side of one lightmap sheet, in texels.
 	AtlasSize = 1024,
-	-- A map needing more than this has its later faces drawn flat, with a warning.
+	-- A map needing more sheets than this has its later faces drawn flat, with a warning.
 	MaxAtlases = 8,
-	-- Texels of gap around each face, so filtering cannot reach the one beside it.
+	-- Texels of gap around each face, so filtering cannot sample the face beside it.
 	AtlasPadding = 1,
-	-- Milliseconds of bake work per client frame. Ten drops a sixty frame client to about fifty
-	-- while a build runs.
+	-- Bake work per client frame, in milliseconds. Ten drops a 60 fps client to about 50 while a build
+	-- runs.
 	ClientBakeBudgetMs = 10,
-	-- The server's bake sizes itself against this tick rate: a late tick halves its allowance and
-	-- an on time one grows it, up to MaxBakeSliceMs or MaxTickUsage of the tick interval. At 48, a
-	-- tick may take 20.8 ms before the bake gives budget back.
+	-- The server's bake takes a slice of each tick, sized to stay on time at this tick rate and bounded
+	-- by these. At 48, a tick may take 20.8 ms before the bake gives budget back.
 	MinServerTickRate = 48,
 	MaxTickUsage = 0.8,
 	MaxBakeSliceMs = 12,
 	MinBakeSliceMs = 1,
 
-	-- The lighting terms. Both switches zero their term everywhere, on both sides, for telling one
-	-- artefact from another; both are in the cache key, so a toggle re-bakes on the next reload.
+	-- Turn either term off to see what the other contributes; a toggle re-bakes on the next reload.
 	EnableSun = true,
 	EnableContactShadows = true,
-	-- The base light every surface starts from, as a fraction of white. A map carrying a
-	-- light_environment overrides it with that entity's own ambient.
+	-- The base light every surface starts from, as a fraction of white. A map with a light_environment
+	-- overrides it with that entity's own ambient.
 	AmbientLight = 0.35,
-	-- Converts a map's _ambient into that base. Source writes it at direct light strength, which
-	-- would saturate a whole interior white.
+	-- Scale applied to the map's own _ambient before it becomes that base light.
 	MapAmbientScale = 0.001,
-	-- How far the darkening at a surface join reaches, in world units, and how dark it is at the
-	-- join itself. The two are one look: a strong crease on a narrow width is a hard line, and the
-	-- same strength spread wider is a shadow.
+	-- How far the contact darkening reaches from a surface join, in world units, and how dark it gets
+	-- there. Narrow and strong reads as a hard line; wider and weaker as a shadow.
 	CreaseWidth = 48,
 	CreaseStrength = 0.2,
-	-- How far in front of a surface a brush may sit and still count as touching it. Deliberately
-	-- small: a ceiling or a beam in mid air is not resting on anything.
+	-- How far in front of a surface a brush may be and still count as touching it. Keep small: a beam in
+	-- mid air touches nothing.
 	CreaseDepth = 2,
 
-	-- The sun. Its angles come from the map's light_environment when it has one, so these are only
-	-- the fallback. Pitch is where the sun is, not where the light goes: -60 is sixty degrees up.
+	-- Used when the map has no light_environment. Pitch is the sun's elevation: -60 is sixty degrees up.
 	DefaultSunAngles = "-60 200 0",
+	-- Colour and strength of that fallback sun.
 	SunColor = "255 245 225",
 	SunBrightness = 1.6,
-	-- Converts a map's own _light, and is separate from the point light scale because a sun reaches
-	-- the whole map with no falloff, so the same number lands far harder.
+	-- Scale applied to a map's own _light. A sun reaches the whole map with no falloff, so the same
+	-- number lands far harder than a lamp's.
 	SunLightScale = 0.002,
-	-- Softness of the shadow edge in texels, a box blur applied after tracing. Zero leaves it hard.
+	-- Softness of the sun's shadow edge, in texels. Zero leaves it hard.
 	ShadowSoftness = 2,
-	-- How far a shadow ray reaches: long enough to leave the map and find sky.
+	-- How far a shadow ray reaches before giving up; longer than the map's diagonal.
 	ShadowRayLength = 8192,
-	-- How close the cover's centre ray may hit before the hit stops counting as proof the grid is not
-	-- lit. The sample traces need no tolerance: each starts offset along its surface's normal and facing
-	-- outward, so its own surface is behind it and nothing met has to be excused.
+	-- Tolerance for classifying a whole face as lit or dark without tracing it: a hit closer than this
+	-- does not count as covering the face.
 	ShadowBias = 2,
 
-	-- Falloff radius for a lamp that does not specify one, and the scale that brings Source's
-	-- hundreds-of-units brightness near 1.
+	-- Falloff radius of a lamp that does not set its own, and the scale applied to its brightness so a
+	-- Source light of a few hundred lands near 1.
 	DefaultLightRadius = 512,
 	PointLightScale = 0.005,
-	-- Texels between lamp shadow samples, interpolated between. A lamp's pool is sharper than the sun's
-	-- edge so this wants to stay small, and per texel tracing re-asks the same question across a whole
-	-- face; at 1 it is a trace per texel and exact.
+	-- Texels between lamp shadow samples, with the gap interpolated. Smaller is sharper and slower; 1
+	-- samples every texel.
 	LampSampleSpacing = 2,
 
-	-- Tracing. Walks the brushes in Lua instead of asking the engine per ray, since the engine's
-	-- cost is per call and the bake makes about two rays per texel. Set false to use the engine.
+	-- Trace shadows in Lua rather than through the engine. Much faster; off only to compare.
 	UseFastTracer = true,
-	-- Cells along the grid's longest axis. Coarser crosses fewer cells per ray and tests more
-	-- brushes in each. The queries pay for the coarseness harder than the rays do: a face's query
-	-- pulls in every brush within a cell of it, and a build on a map this size averages a hundred.
+	-- Cells along the tracer grid's longest axis. Coarser crosses fewer cells per ray but tests more
+	-- brushes in each.
 	TracerGridSize = 128,
-	-- How far off the surface a sample starts. Too small and a trace at a corner begins inside the
-	-- neighbouring brush, which leaks light through joints.
+	-- How far off the surface a shadow ray starts. Too small and a corner sample starts inside the
+	-- neighbouring brush, leaking light at joints.
 	TraceStartOffset = 1,
 
 }
