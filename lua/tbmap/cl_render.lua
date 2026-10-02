@@ -184,12 +184,6 @@ function TBMap.BuildPhysics(class, chunks, label)
 			pending = true
 		elseif not ent.tbPhysicsBuilt or ent.tbConvexes ~= convexes
 			or not IsValid(ent:GetPhysicsObject()) then
-			if jit and jit.arch == "x86" then
-				print("[tbmap] 32 bit client, skipping client collision. " ..
-					"Building large physics objects crashes 32 bit clients.")
-				return true
-			end
-
 			ent:SetSolid(SOLID_VPHYSICS)
 
 			if ent:PhysicsInitMultiConvex(convexes, cfg.SurfaceProp) then

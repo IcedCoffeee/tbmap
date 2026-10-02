@@ -22,8 +22,8 @@ TBMap.Config = {
 	FaceUpThreshold = 0.7,
 	-- Build the same collision on the client so movement prediction matches the server.
 	ClientSideCollision = true,
-	-- Collision is one physics object per cube this many units across. Smaller cubes suit large maps and
-	-- 32 bit clients; larger cubes use fewer objects.
+	-- Collision is one physics object per cube this many units across. Smaller cubes keep each object
+	-- under 32 bit VPhysics's vertex cap, at the cost of more objects.
 	CollisionChunkSize = 1024,
 	-- The material the world's collision reports, for footstep and impact sounds.
 	SurfaceProp = "concrete",
