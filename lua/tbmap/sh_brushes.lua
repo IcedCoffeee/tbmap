@@ -117,21 +117,51 @@ function TBMap.Brushes.Near(mins, maxs, margin)
 	local y1 = math.min(math.floor((maxs.y - grid.oy) / cell) + pad, ny - 1)
 	local z1 = math.min(math.floor((maxs.z - grid.oz) / cell) + pad, grid.nz - 1)
 
-	for z = z0, z1 do
-		for y = y0, y1 do
-			local rowBase = (z * ny + y) * nx
+	local boxCells = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
+	local occupied = grid.occupied
 
-			for x = x0, x1 do
-				local list = grid.cells[rowBase + x + 1]
+	-- Whichever is fewer: the cells in the box, or the cells that hold brushes. The prism box a sun face
+	-- asks about is long and thin and mostly empty, so walking the occupied cells skips the empty ones.
+	if occupied and boxCells > #occupied then
+		local stride = nx * ny
 
-				if list then
-					for i = 1, #list do
-						local index = list[i]
+		for i = 1, #occupied do
+			local key = occupied[i]
+			local x = key % nx
+			local y = math.floor(key / nx) % ny
+			local z = math.floor(key / stride)
 
-						if not seen[index] then
-							seen[index] = true
-							count = count + 1
-							candidates[count] = index
+			if x >= x0 and x <= x1 and y >= y0 and y <= y1 and z >= z0 and z <= z1 then
+				local list = grid.cells[key + 1]
+
+				for j = 1, #list do
+					local index = list[j]
+
+					if not seen[index] then
+						seen[index] = true
+						count = count + 1
+						candidates[count] = index
+					end
+				end
+			end
+		end
+	else
+		for z = z0, z1 do
+			for y = y0, y1 do
+				local rowBase = (z * ny + y) * nx
+
+				for x = x0, x1 do
+					local list = grid.cells[rowBase + x + 1]
+
+					if list then
+						for i = 1, #list do
+							local index = list[i]
+
+							if not seen[index] then
+								seen[index] = true
+								count = count + 1
+								candidates[count] = index
+							end
 						end
 					end
 				end

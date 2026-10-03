@@ -18,6 +18,7 @@ function TBMap.Trace.Build()
 		grid.cell = 1
 		grid.nx, grid.ny, grid.nz = 0, 0, 0
 		grid.cells = {}
+		grid.occupied, grid.occupiedCount = {}, 0
 		TBMap.Probe.Stop("grid")
 		return
 	end
@@ -82,6 +83,20 @@ function TBMap.Trace.Build()
 			end
 		end
 	end
+
+	-- The occupied cells as a flat list, so a query whose box is mostly empty can walk those instead.
+	-- A sun face asks about the prism its shadow sweeps along the light, which is long and thin, and the
+	-- box around it is far bigger than the brushes in it or the cells that hold them.
+	local occupied, occupiedCount = {}, 0
+
+	for key, cellList in pairs(grid.cells) do
+		if #cellList > 0 then
+			occupiedCount = occupiedCount + 1
+			occupied[occupiedCount] = key - 1
+		end
+	end
+
+	grid.occupied, grid.occupiedCount = occupied, occupiedCount
 
 	TBMap.Probe.Stop("grid")
 end

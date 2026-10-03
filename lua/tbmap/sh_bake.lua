@@ -752,7 +752,9 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 		if SysTime() > (TBMap.Bake.sliceDeadline or 0) then coroutine.yield() end
 	end
 
+	TBMap.Probe.Start("bake.sort")
 	table.sort(plans, function(a, b) return a.s.height > b.s.height end)
+	TBMap.Probe.Stop("bake.sort")
 
 	local cellsOf = {}
 
@@ -1399,6 +1401,95 @@ end
 
 function Bake.CacheKey(payload)
 	return string.format("%08x", util.CRC(payload .. "|" .. SettingsString()))
+end
+
+-- The last few bakes, by the key below. Kept across a reload in this process, which is what makes
+-- editing textures free: the key does not read them, so the bake they cannot change is reused.
+local lightCache, lightCacheOrder = {}, {}
+
+function Bake.CachedLight(key)
+	return key and lightCache[key]
+end
+
+function Bake.ClearLightCache()
+	table.Empty(lightCache)
+	table.Empty(lightCacheOrder)
+end
+
+function Bake.StoreLight(key, buffer)
+	if not key or not buffer then return end
+
+	if not lightCache[key] then
+		lightCacheOrder[#lightCacheOrder + 1] = key
+
+		if #lightCacheOrder > 2 then
+			lightCache[table.remove(lightCacheOrder, 1)] = nil
+		end
+	end
+
+	lightCache[key] = buffer
+end
+
+-- Everything the bake reads, and nothing it does not: the brush planes the shadows are traced against,
+-- which brushes are see through and which cover, the drawn pieces the coverage comes from, the lights,
+-- and the settings. Materials, texture axes and scales are left out on purpose, since a bake does not
+-- depend on them, so retexturing the same geometry is a cache hit rather than another fourteen seconds.
+function Bake.LightingKey()
+	local parts = { SettingsString() }
+	local world = TBMap.World or {}
+	local brushes = TBMap.Brushes.list
+	local draws = world.Draws or {}
+
+	-- Per brush, sorted by brush id, so the key does not depend on the order the brush list was built
+	-- in: it is a different list every load, and its order is not promised.
+	local brushParts, brushCount = {}, 0
+
+	for i = 1, #brushes do
+		local brush = brushes[i]
+		local planes = brush.planes
+		local out = { brush.seeThrough and "t" or "s", draws[brush.brush] and "1" or "0" }
+
+		for p = 1, #planes, 4 do
+			out[#out + 1] = string.format("%.3f,%.3f,%.3f,%.3f",
+				planes[p], planes[p + 1], planes[p + 2], planes[p + 3])
+		end
+
+		brushCount = brushCount + 1
+		brushParts[brushCount] = { brush.brush, table.concat(out, ",") }
+	end
+
+	table.sort(brushParts, function(a, b) return a[1] < b[1] end)
+
+	for i = 1, brushCount do
+		parts[#parts + 1] = brushParts[i][2] .. ";"
+	end
+
+	for _, piece in ipairs(world.RenderFaces or {}) do
+		local poly = piece.poly
+
+		parts[#parts + 1] = tostring(piece.tbSource or piece.tbWhole or 0) .. ";"
+
+		for i = 1, #poly do
+			local v = poly[i]
+
+			parts[#parts + 1] = string.format("%.3f,%.3f,%.3f;", v.x, v.y, v.z)
+		end
+	end
+
+	for _, light in ipairs(world.Lights or {}) do
+		local dir, pos, colour, ambient = light.dir, light.pos, light.color, light.ambient
+
+		parts[#parts + 1] = string.format(
+			"%s;%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%.4f,%.4f,%.4f;%.4f;%.3f;%.5f;%.5f;%.4f,%.4f,%.4f;",
+			tostring(light.kind),
+			dir and dir.x or 0, dir and dir.y or 0, dir and dir.z or 0,
+			pos and pos.x or 0, pos and pos.y or 0, pos and pos.z or 0,
+			colour and colour.x or 0, colour and colour.y or 0, colour and colour.z or 0,
+			light.brightness or 0, light.radius or 0, light.cosOuter or 0, light.cosInner or 0,
+			ambient and ambient.x or 0, ambient and ambient.y or 0, ambient and ambient.z or 0)
+	end
+
+	return string.format("%08x", util.CRC(table.concat(parts)))
 end
 
 -- A late tick halves the allowance, an on time one grows it by a tenth, and the ceiling is a fraction

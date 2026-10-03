@@ -707,9 +707,9 @@ function TBMap.CreateCollision(chunks, class, label, soup)
 		rejected > 0 and (", " .. rejected .. " rejected") or "", (SysTime() - started) * 1000))
 end
 
--- Bakes the sun's visibility and sends it. Nothing is kept on disk between runs: the bake is served to
--- everyone at once, and what a record says about the geometry is in its key already.
-function TBMap.BakeLighting()
+-- Bakes the sun's visibility and sends it. key is the lighting key the result is filed under, so a
+-- later load of the same geometry and lights reuses it instead of tracing again.
+function TBMap.BakeLighting(key)
 	if not World.BakeFaces or not World.BakeFaces[1] then return end
 
 	local started = SysTime()
@@ -745,6 +745,7 @@ function TBMap.BakeLighting()
 
 		hook.Remove("Think", "tbmap_light_bake")
 		World.LightBuffer = buffer
+		TBMap.Bake.StoreLight(key, buffer)
 
 		print(string.format(
 			"[tbmap] composed and packed the lighting on the server in %.1f s, %.1f KB",
@@ -857,7 +858,19 @@ function TBMap.Load()
 	TBMap.CreateCollision(World.ClipConvexChunks, "tbmap_clip", "clip", nil)
 	TBMap.CreateSpawns()
 
-	TBMap.BakeLighting()
+	-- The lighting depends on the geometry and the lights, not the materials, so a reload that only
+	-- retextures finds its last bake here and skips the rays entirely.
+	local keyStart = SysTime()
+	local key = TBMap.Bake.LightingKey()
+	local keyMs = (SysTime() - keyStart) * 1000
+	local cached = TBMap.Bake.CachedLight(key)
+
+	if cached then
+		World.LightBuffer = cached
+		print(string.format("[tbmap] lighting is unchanged, reusing the last bake (key %.0f ms)", keyMs))
+	else
+		TBMap.BakeLighting(key)
+	end
 
 	-- Only once the lighting exists, so a client rebuilds once rather than twice.
 	if World.LightBuffer then
@@ -925,7 +938,17 @@ end)
 concommand.Add("tbmap_reload", function(ply, _, args)
 	if IsValid(ply) and not ply:IsSuperAdmin() then return end
 
+	-- "clean" forces the full bake rather than reusing an unchanged one, for comparing the two.
+	if args[1] == "clean" then TBMap.Bake.ClearLightCache() end
+
 	TBMap.Load()
+end)
+
+concommand.Add("tbmap_cacheclear", function(ply)
+	if IsValid(ply) and not ply:IsSuperAdmin() then return end
+
+	TBMap.Bake.ClearLightCache()
+	print("[tbmap] lighting cache cleared")
 end)
 
 util.AddNetworkString("tbmap_unload")
