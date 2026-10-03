@@ -163,9 +163,10 @@ TBMap.Config = {
 
 	-- Trace shadows in Lua rather than through the engine. Much faster; off only to compare.
 	UseFastTracer = true,
-	-- Cells along the tracer grid's longest axis. Coarser crosses fewer cells per ray but tests more
-	-- brushes in each.
-	TracerGridSize = 128,
+	-- Cells along the tracer grid's longest axis. The grid only traces rays now that box queries use the
+	-- brush tree, and a ray crosses fewer cells the coarser it is, so this is coarse; past about half
+	-- this the brushes per cell start to cost more than the cells saved.
+	TracerGridSize = 64,
 	-- How far off the surface a shadow ray starts. Too small and a corner sample starts inside the
 	-- neighbouring brush, leaking light at joints.
 	TraceStartOffset = 1,

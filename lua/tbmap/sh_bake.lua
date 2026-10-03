@@ -933,32 +933,57 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 		-- The nearest point on the surface this face draws, the pieces rather than the whole face's
 		-- plane: a node under a wall borders that wall, not the face's far edge, so the value it takes is
 		-- the contact's own and not the lighting of somewhere else on the face.
-		local function SnapToFace(u, w)
-			local best, su, sw = math.huge, u, w
+		-- Every edge of every piece as flat numbers, built once per face on the first snap. The per node
+		-- walk then indexes numbers rather than a piece table per edge. Interior seams between pieces are
+		-- kept: a point on one is inside the drawn region, and the boundary is nearer to any node outside
+		-- it, so they never win the minimum.
+		local edgeAX, edgeAW, edgeEX, edgeEW, edgeL2, edgeCount
+		local edgesReady = false
+
+		local function BuildEdges()
+			edgesReady = true
+			edgeAX, edgeAW, edgeEX, edgeEW, edgeL2 = {}, {}, {}, {}, {}
+			edgeCount = 0
 
 			for p = 1, pieceCount do
 				local qu, qw, qn = pieces[p].u, pieces[p].w, pieces[p].n
 
 				for i = 1, qn do
 					local j = i % qn + 1
-					local au, aw = qu[i], qw[i]
-					local eu, ew = qu[j] - au, qw[j] - aw
-					local l2 = eu * eu + ew * ew
-					local t = 0
+					local ax, aw = qu[i], qw[i]
+					local ex, ew = qu[j] - ax, qw[j] - aw
 
-					if l2 > 0 then
-						t = ((u - au) * eu + (w - aw) * ew) / l2
+					edgeCount = edgeCount + 1
+					edgeAX[edgeCount], edgeAW[edgeCount] = ax, aw
+					edgeEX[edgeCount], edgeEW[edgeCount] = ex, ew
+					edgeL2[edgeCount] = ex * ex + ew * ew
+				end
+			end
+		end
 
-						if t < 0 then t = 0 elseif t > 1 then t = 1 end
-					end
+		local function SnapToFace(u, w)
+			if not edgesReady then BuildEdges() end
 
-					local quu, qww = au + eu * t, aw + ew * t
-					local du, dw = u - quu, w - qww
-					local d2 = du * du + dw * dw
+			local best, su, sw = math.huge, u, w
 
-					if d2 < best then
-						best, su, sw = d2, quu, qww
-					end
+			for e = 1, edgeCount do
+				local ax, aw = edgeAX[e], edgeAW[e]
+				local ex, ew = edgeEX[e], edgeEW[e]
+				local t = 0
+				local l2 = edgeL2[e]
+
+				if l2 > 0 then
+					t = ((u - ax) * ex + (w - aw) * ew) / l2
+
+					if t < 0 then t = 0 elseif t > 1 then t = 1 end
+				end
+
+				local quu, qww = ax + ex * t, aw + ew * t
+				local du, dw = u - quu, w - qww
+				local d2 = du * du + dw * dw
+
+				if d2 < best then
+					best, su, sw = d2, quu, qww
 				end
 			end
 
