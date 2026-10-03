@@ -124,8 +124,8 @@ local suspectIndices = {}
 -- ray passes through the prism the corners sweep toward the light, and a brush's shadow is inside its
 -- box's projection onto the face's plane, so a brush this misses cannot block any sample.
 local function Suspects(s, points, u0, u1, v0, v1, dx, dy, dz)
-	local grid = TBMap.Trace.grid
-	if grid.nx == 0 then return 0 end
+	local Trace = TBMap.Trace
+	if Trace.empty then return 0 end
 
 	local n = s.face.normal
 	local nd = n.x * dx + n.y * dy + n.z * dz
@@ -133,11 +133,8 @@ local function Suspects(s, points, u0, u1, v0, v1, dx, dy, dz)
 
 	if nd <= 0 then return 0 end
 
-	local cell = grid.cell
-	local bx0, by0, bz0 = grid.ox, grid.oy, grid.oz
-	local bx1 = bx0 + grid.nx * cell
-	local by1 = by0 + grid.ny * cell
-	local bz1 = bz0 + grid.nz * cell
+	local bx0, by0, bz0 = Trace.minx, Trace.miny, Trace.minz
+	local bx1, by1, bz1 = Trace.maxx, Trace.maxy, Trace.maxz
 
 	local far, anchorNear = -math.huge, math.huge
 
@@ -252,21 +249,19 @@ function Cover.Grid(s, cols, rows, stride, dx, dy, dz, bias)
 
 	if n.x * dx + n.y * dy + n.z * dz <= 0 then return "dark" end
 
-	local grid = TBMap.Trace.grid
-	if grid.nx == 0 then return "mixed" end
+	local Trace = TBMap.Trace
+	if Trace.empty then return "mixed" end
 
 	TBMap.Probe.Start("cover.anchors")
 	local points, u0, u1, v0, v1 = Anchors(s, cols, rows, stride)
 	TBMap.Probe.Stop("cover.anchors")
 
-	local cell = grid.cell
-
 	local far = -math.huge
 
 	for mask = 0, 7 do
-		local x = (mask % 2 == 0) and grid.ox or (grid.ox + grid.nx * cell)
-		local y = (math.floor(mask / 2) % 2 == 0) and grid.oy or (grid.oy + grid.ny * cell)
-		local z = (math.floor(mask / 4) % 2 == 0) and grid.oz or (grid.oz + grid.nz * cell)
+		local x = (mask % 2 == 0) and Trace.minx or Trace.maxx
+		local y = (math.floor(mask / 2) % 2 == 0) and Trace.miny or Trace.maxy
+		local z = (math.floor(mask / 4) % 2 == 0) and Trace.minz or Trace.maxz
 		local d = x * dx + y * dy + z * dz
 
 		if d > far then far = d end

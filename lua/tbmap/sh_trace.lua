@@ -1,32 +1,169 @@
 -- Shadow tracer.
 --
--- The engine's trace costs the same whether a ray is short or long, so this walks the brushes instead:
--- a uniform grid, each brush bucketed into the cells its box overlaps, a cell by cell walk and a plane
--- clip. It satisfies the contract of the engine trace in sh_bake.
+-- The engine's trace costs the same whether a ray is short or long, so this walks the brushes instead.
+-- The bake asks two questions and each has its own structure: a ray is walked along a uniform grid,
+-- because a DDA visits only the cells the line crosses, while a box query is answered from a tree over
+-- the brush boxes, because a box that covers most of the map makes the grid visit every brush once per
+-- cell it fills. The grid is too costly to build to use it for box queries, and the tree of overlapping
+-- slabs is too loose to walk a long ray with.
 
 TBMap = TBMap or {}
 
-TBMap.Trace = { grid = { cell = 1, ox = 0, oy = 0, oz = 0, nx = 0, ny = 0, nz = 0, cells = {} } }
+-- Brushes per tree leaf: small enough that a leaf is a handful of plane clips, large enough that the
+-- tree stays shallow.
+local LEAF = 8
 
-function TBMap.Trace.Build()
-	TBMap.Probe.Start("grid")
+TBMap.Trace = {
+	nodes = {}, order = {}, root = 0, empty = true,
+	minx = 0, miny = 0, minz = 0, maxx = 0, maxy = 0, maxz = 0,
+	nearStack = {},
+	grid = { cell = 1, ox = 0, oy = 0, oz = 0, nx = 0, ny = 0, nz = 0, cells = {} },
+}
 
-	local grid = TBMap.Trace.grid
+local Trace = TBMap.Trace
+
+-- =========================================================================
+-- The tree, for box queries
+-- =========================================================================
+
+-- The box around order[lo..hi], from the brushes' own boxes.
+local function Bounds(lo, hi, order, list)
+	local brush = list[order[lo]]
+	local minx, miny, minz = brush.minx, brush.miny, brush.minz
+	local maxx, maxy, maxz = brush.maxx, brush.maxy, brush.maxz
+
+	for k = lo + 1, hi do
+		local b = list[order[k]]
+
+		if b.minx < minx then minx = b.minx end
+		if b.miny < miny then miny = b.miny end
+		if b.minz < minz then minz = b.minz end
+		if b.maxx > maxx then maxx = b.maxx end
+		if b.maxy > maxy then maxy = b.maxy end
+		if b.maxz > maxz then maxz = b.maxz end
+	end
+
+	return minx, miny, minz, maxx, maxy, maxz
+end
+
+-- order[lo..hi] by the brushes' centres on one axis, ascending. A ranged sort, so it goes through a
+-- scratch list rather than table.sort, which only takes a whole table.
+local scratch = {}
+
+local function SortRange(lo, hi, axis, order, list)
+	local n = 0
+
+	for k = lo, hi do
+		local b = list[order[k]]
+		local centre
+
+		if axis == 1 then
+			centre = b.minx + b.maxx
+		elseif axis == 2 then
+			centre = b.miny + b.maxy
+		else
+			centre = b.minz + b.maxz
+		end
+
+		n = n + 1
+		scratch[n] = { centre, order[k] }
+	end
+
+	table.sort(scratch, function(a, b) return a[1] < b[1] end)
+
+	for k = 1, n do
+		order[lo + k - 1] = scratch[k][2]
+		scratch[k] = nil
+	end
+end
+
+-- Median split on the longest axis. The leaves partition the brush list, so no brush is reached twice.
+local function Split(lo, hi, order, list, nodes)
+	local minx, miny, minz, maxx, maxy, maxz = Bounds(lo, hi, order, list)
+	local at = #nodes + 1
+	local node = { minx = minx, miny = miny, minz = minz, maxx = maxx, maxy = maxy, maxz = maxz }
+	nodes[at] = node
+
+	if hi - lo + 1 <= LEAF then
+		node.start = lo
+		node.count = hi - lo + 1
+		return at
+	end
+
+	local spanX, spanY, spanZ = maxx - minx, maxy - miny, maxz - minz
+	local axis
+
+	if spanX >= spanY and spanX >= spanZ then
+		axis = 1
+	elseif spanY >= spanZ then
+		axis = 2
+	else
+		axis = 3
+	end
+
+	local mid = math.floor((lo + hi) * 0.5)
+
+	SortRange(lo, hi, axis, order, list)
+
+	node.left = Split(lo, mid, order, list, nodes)
+	node.right = Split(mid + 1, hi, order, list, nodes)
+	node.count = 0
+
+	return at
+end
+
+local function BuildTree()
+	local list = TBMap.Brushes.list
+	local order = {}
+	local minx, miny, minz = math.huge, math.huge, math.huge
+	local maxx, maxy, maxz = -math.huge, -math.huge, -math.huge
+
+	for index = 1, #list do
+		TBMap.Bake.Slice()
+
+		local brush = list[index]
+
+		-- Light passes through a see-through brush as it does through sky and clip, so its hull is left
+		-- out: a pane left in the tree casts a shadow, which is a dark rectangle under it.
+		if not brush.seeThrough then
+			order[#order + 1] = index
+
+			if brush.minx < minx then minx = brush.minx end
+			if brush.miny < miny then miny = brush.miny end
+			if brush.minz < minz then minz = brush.minz end
+			if brush.maxx > maxx then maxx = brush.maxx end
+			if brush.maxy > maxy then maxy = brush.maxy end
+			if brush.maxz > maxz then maxz = brush.maxz end
+		end
+	end
+
+	local nodes = {}
+	local root = #order > 0 and Split(1, #order, order, list, nodes) or 0
+
+	Trace.nodes, Trace.order, Trace.root = nodes, order, root
+	Trace.empty = root == 0
+	Trace.minx, Trace.miny, Trace.minz = minx, miny, minz
+	Trace.maxx, Trace.maxy, Trace.maxz = maxx, maxy, maxz
+end
+
+-- =========================================================================
+-- The ray grid, for tracing
+-- =========================================================================
+
+local function BuildGrid()
+	local grid = Trace.grid
 	local list = TBMap.Brushes.list
 
 	if not list[1] then
 		grid.cell = 1
 		grid.nx, grid.ny, grid.nz = 0, 0, 0
 		grid.cells = {}
-		grid.occupied, grid.occupiedCount = {}, 0
-		grid.insertions = 0
-		TBMap.Probe.Stop("grid")
 		return
 	end
 
 	-- The grid covers the brushes, since brushes are what it is there to find, and a brush's box is the
-	-- map's own extent for anything the tracer asks. A query outside it still answers: the cell walk and
-	-- the near query both clamp to the edge cell.
+	-- map's own extent for anything the tracer asks. A query outside it still answers: the cell walk
+	-- clamps to the edge cell.
 	local minx, miny, minz = list[1].minx, list[1].miny, list[1].minz
 	local maxx, maxy, maxz = list[1].maxx, list[1].maxy, list[1].maxz
 
@@ -53,7 +190,6 @@ function TBMap.Trace.Build()
 	grid.cells = {}
 
 	local nx, ny = grid.nx, grid.ny
-	local insertions = 0
 
 	for index, brush in ipairs(list) do
 		TBMap.Bake.Slice()
@@ -69,39 +205,29 @@ function TBMap.Trace.Build()
 			for y = y0, y1 do
 				for x = x0, x1 do
 					local key = (z * ny + y) * nx + x + 1
-					local list = grid.cells[key]
+					local bucket = grid.cells[key]
 
-					if not list then
-						list = {}
-						grid.cells[key] = list
+					if not bucket then
+						bucket = {}
+						grid.cells[key] = bucket
 					end
 
-					-- Light passes through a see-through brush as it does through sky and clip, so its hull is not
-					-- bucketed: a pane left in the grid casts a shadow, which is a dark rectangle under it.
 					if not brush.seeThrough then
-						list[#list + 1] = index
-						insertions = insertions + 1
+						bucket[#bucket + 1] = index
 					end
 				end
 			end
 		end
 	end
+end
 
-	-- The occupied cells as a flat list, so a query whose box is mostly empty can walk those instead.
-	-- A sun face asks about the prism its shadow sweeps along the light, which is long and thin, and the
-	-- box around it is far bigger than the brushes in it or the cells that hold them.
-	local occupied, occupiedCount = {}, 0
+function TBMap.Trace.Build()
+	TBMap.Probe.Start("tree")
+	BuildTree()
+	TBMap.Probe.Stop("tree")
 
-	for key, cellList in pairs(grid.cells) do
-		if #cellList > 0 then
-			occupiedCount = occupiedCount + 1
-			occupied[occupiedCount] = key - 1
-		end
-	end
-
-	grid.occupied, grid.occupiedCount = occupied, occupiedCount
-	grid.insertions = insertions
-
+	TBMap.Probe.Start("grid")
+	BuildGrid()
 	TBMap.Probe.Stop("grid")
 end
 
@@ -109,7 +235,7 @@ end
 -- the next cell boundary. The direction has to be normalised: the parameter is a distance in world
 -- units.
 local function Walk(fx, fy, fz, dx, dy, dz, length)
-	local grid = TBMap.Trace.grid
+	local grid = Trace.grid
 	local cell = grid.cell
 	local nx, ny, nz = grid.nx, grid.ny, grid.nz
 
@@ -141,12 +267,12 @@ local function Walk(fx, fy, fz, dx, dy, dz, length)
 
 		if list then
 			for i = 1, #list do
-				-- Written out rather than called: a call the JIT will not inline is paid once per brush, in
-				-- the innermost loop of the bake.
+				-- Written out rather than called: a call the JIT will not inline is paid once per brush,
+				-- in the innermost loop of the bake.
 				--
-				-- A convex brush is the intersection of its face planes, so the ray keeps the interval where
-				-- it is inside all of them: tmin from the last plane to admit it, tmax from the first to
-				-- reject it. An inverted interval is a miss. Four numbers per plane: nx, ny, nz, d.
+				-- A convex brush is the intersection of its face planes, so the ray keeps the interval
+				-- where it is inside all of them: tmin from the last plane to admit it, tmax from the
+				-- first to reject it. An inverted interval is a miss. Four numbers per plane: nx, ny, nz, d.
 				local planes = TBMap.Brushes.list[list[i]].planes
 				local tmin, tmax = 0, length
 
@@ -158,8 +284,8 @@ local function Walk(fx, fy, fz, dx, dy, dz, length)
 					if den > -1e-6 and den < 1e-6 then
 						if num > 0 then tmin, tmax = 1, 0 end
 					else
-						-- Inside is f <= 0 for f(t) = num + den*t. Growing den means leaving the half space, so it
-						-- clamps tmax; shrinking means entering, so it clamps tmin.
+						-- Inside is f <= 0 for f(t) = num + den*t. Growing den means leaving the half space,
+						-- so it clamps tmax; shrinking means entering, so it clamps tmin.
 						local t = -num / den
 
 						if den > 0 then
@@ -201,7 +327,7 @@ local function Walk(fx, fy, fz, dx, dy, dz, length)
 end
 
 function TBMap.Trace.Ray(fx, fy, fz, dx, dy, dz, length)
-	local grid = TBMap.Trace.grid
+	local grid = Trace.grid
 	if grid.nx == 0 then return false, false, 0 end
 
 	local hit = Walk(fx, fy, fz, dx, dy, dz, length)

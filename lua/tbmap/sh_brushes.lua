@@ -81,123 +81,58 @@ function TBMap.Brushes.Build(faces)
 	return convexes
 end
 
--- The brushes whose boxes overlap a box, from the tracer's grid. The result table is reused, since
--- this runs once per face.
-local seen = {}
+-- The brushes whose boxes overlap a box, from the tracer's tree. The result table is reused, since
+-- this runs once per face. The tree's leaves partition the brush list, so no brush is reached twice.
 local candidates = {}
 
 function TBMap.Brushes.Near(mins, maxs, margin)
-	local grid = TBMap.Trace.grid
-	local count = 0
-
-	-- Counted, because how many candidates the grid hands back is what the clip, the cover and the
-	-- contact gather all pay per call, and it is the grid's cell size that decides it.
+	-- Counted, because how many candidates the tree hands back is what the clip, the cover and the
+	-- contact gather all pay per call.
 	TBMap.NearCalls = (TBMap.NearCalls or 0) + 1
 
-	if grid.nx == 0 then
-		for index = 1, #TBMap.Brushes.list do
-			count = count + 1
-			candidates[count] = index
-		end
+	local margin = margin or 0
+	local minx, miny, minz = mins.x - margin, mins.y - margin, mins.z - margin
+	local maxx, maxy, maxz = maxs.x + margin, maxs.y + margin, maxs.z + margin
 
-		TBMap.NearCandidates = (TBMap.NearCandidates or 0) + count
+	local Trace = TBMap.Trace
+	local count = 0
 
-		return candidates, count
-	end
+	if Trace.root ~= 0 then
+		local nodes, order, list = Trace.nodes, Trace.order, TBMap.Brushes.list
+		local stack = Trace.nearStack
+		local top = 1
 
-	local cell = grid.cell
-	local nx, ny = grid.nx, grid.ny
+		stack[1] = Trace.root
 
-	local pad = math.floor((margin or 0) / cell) + 1
+		while top > 0 do
+			local node = nodes[stack[top]]
+			top = top - 1
 
-	local x0 = math.max(math.floor((mins.x - grid.ox) / cell) - pad, 0)
-	local y0 = math.max(math.floor((mins.y - grid.oy) / cell) - pad, 0)
-	local z0 = math.max(math.floor((mins.z - grid.oz) / cell) - pad, 0)
-	local x1 = math.min(math.floor((maxs.x - grid.ox) / cell) + pad, nx - 1)
-	local y1 = math.min(math.floor((maxs.y - grid.oy) / cell) + pad, ny - 1)
-	local z1 = math.min(math.floor((maxs.z - grid.oz) / cell) + pad, grid.nz - 1)
+			if node.maxx >= minx and node.minx <= maxx
+				and node.maxy >= miny and node.miny <= maxy
+				and node.maxz >= minz and node.minz <= maxz then
 
-	local boxCells = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
-	local occupied = grid.occupied
+				if node.count > 0 then
+					for k = node.start, node.start + node.count - 1 do
+						local index = order[k]
+						local brush = list[index]
 
-	-- Whichever is fewer: the cells in the box, or the cells that hold brushes. The prism box a sun face
-	-- asks about is long and thin and mostly empty, so walking the occupied cells skips the empty ones.
-	if occupied and boxCells > #occupied then
-		local brushList = TBMap.Brushes.list
-
-		-- A box this large makes the walk visit a brush once per cell it fills, which is more than one
-		-- test per brush, so once the grid holds more entries than there are brushes the flat list is the
-		-- cheaper enumeration. It is the same set: a brush is a candidate when its box meets a cell of
-		-- the query, which is a box overlap with the extent of those cells.
-		if (grid.insertions or #occupied) > #brushList then
-			local minx, miny, minz = grid.ox + x0 * cell, grid.oy + y0 * cell, grid.oz + z0 * cell
-			local maxx, maxy, maxz = grid.ox + (x1 + 1) * cell, grid.oy + (y1 + 1) * cell,
-				grid.oz + (z1 + 1) * cell
-
-			for index = 1, #brushList do
-				local brush = brushList[index]
-
-				if not brush.seeThrough
-					and brush.minx <= maxx and brush.maxx >= minx
-					and brush.miny <= maxy and brush.maxy >= miny
-					and brush.minz <= maxz and brush.maxz >= minz then
-					count = count + 1
-					candidates[count] = index
-				end
-			end
-
-			TBMap.NearCandidates = (TBMap.NearCandidates or 0) + count
-
-			return candidates, count
-		end
-
-		local stride = nx * ny
-
-		for i = 1, #occupied do
-			local key = occupied[i]
-			local x = key % nx
-			local y = math.floor(key / nx) % ny
-			local z = math.floor(key / stride)
-
-			if x >= x0 and x <= x1 and y >= y0 and y <= y1 and z >= z0 and z <= z1 then
-				local list = grid.cells[key + 1]
-
-				for j = 1, #list do
-					local index = list[j]
-
-					if not seen[index] then
-						seen[index] = true
-						count = count + 1
-						candidates[count] = index
-					end
-				end
-			end
-		end
-	else
-		for z = z0, z1 do
-			for y = y0, y1 do
-				local rowBase = (z * ny + y) * nx
-
-				for x = x0, x1 do
-					local list = grid.cells[rowBase + x + 1]
-
-					if list then
-						for i = 1, #list do
-							local index = list[i]
-
-							if not seen[index] then
-								seen[index] = true
-								count = count + 1
-								candidates[count] = index
-							end
+						if brush.maxx >= minx and brush.minx <= maxx
+							and brush.maxy >= miny and brush.miny <= maxy
+							and brush.maxz >= minz and brush.minz <= maxz then
+							count = count + 1
+							candidates[count] = index
 						end
 					end
+				else
+					top = top + 1
+					stack[top] = node.left
+					top = top + 1
+					stack[top] = node.right
 				end
 			end
 		end
 	end
-
-	for i = 1, count do seen[candidates[i]] = nil end
 
 	TBMap.NearCandidates = (TBMap.NearCandidates or 0) + count
 
