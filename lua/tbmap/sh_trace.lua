@@ -19,6 +19,7 @@ function TBMap.Trace.Build()
 		grid.nx, grid.ny, grid.nz = 0, 0, 0
 		grid.cells = {}
 		grid.occupied, grid.occupiedCount = {}, 0
+		grid.insertions = 0
 		TBMap.Probe.Stop("grid")
 		return
 	end
@@ -52,6 +53,7 @@ function TBMap.Trace.Build()
 	grid.cells = {}
 
 	local nx, ny = grid.nx, grid.ny
+	local insertions = 0
 
 	for index, brush in ipairs(list) do
 		TBMap.Bake.Slice()
@@ -78,6 +80,7 @@ function TBMap.Trace.Build()
 					-- bucketed: a pane left in the grid casts a shadow, which is a dark rectangle under it.
 					if not brush.seeThrough then
 						list[#list + 1] = index
+						insertions = insertions + 1
 					end
 				end
 			end
@@ -97,6 +100,7 @@ function TBMap.Trace.Build()
 	end
 
 	grid.occupied, grid.occupiedCount = occupied, occupiedCount
+	grid.insertions = insertions
 
 	TBMap.Probe.Stop("grid")
 end

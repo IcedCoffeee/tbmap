@@ -123,6 +123,34 @@ function TBMap.Brushes.Near(mins, maxs, margin)
 	-- Whichever is fewer: the cells in the box, or the cells that hold brushes. The prism box a sun face
 	-- asks about is long and thin and mostly empty, so walking the occupied cells skips the empty ones.
 	if occupied and boxCells > #occupied then
+		local brushList = TBMap.Brushes.list
+
+		-- A box this large makes the walk visit a brush once per cell it fills, which is more than one
+		-- test per brush, so once the grid holds more entries than there are brushes the flat list is the
+		-- cheaper enumeration. It is the same set: a brush is a candidate when its box meets a cell of
+		-- the query, which is a box overlap with the extent of those cells.
+		if (grid.insertions or #occupied) > #brushList then
+			local minx, miny, minz = grid.ox + x0 * cell, grid.oy + y0 * cell, grid.oz + z0 * cell
+			local maxx, maxy, maxz = grid.ox + (x1 + 1) * cell, grid.oy + (y1 + 1) * cell,
+				grid.oz + (z1 + 1) * cell
+
+			for index = 1, #brushList do
+				local brush = brushList[index]
+
+				if not brush.seeThrough
+					and brush.minx <= maxx and brush.maxx >= minx
+					and brush.miny <= maxy and brush.maxy >= miny
+					and brush.minz <= maxz and brush.maxz >= minz then
+					count = count + 1
+					candidates[count] = index
+				end
+			end
+
+			TBMap.NearCandidates = (TBMap.NearCandidates or 0) + count
+
+			return candidates, count
+		end
+
 		local stride = nx * ny
 
 		for i = 1, #occupied do
