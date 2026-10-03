@@ -669,6 +669,126 @@ local function CoverFrame(s, cols, rows)
 	}
 end
 
+-- =========================================================================
+-- Per face cache
+-- =========================================================================
+
+-- A face's texels depend on a bounded set of things: its own drawn surface and grid, the brushes whose
+-- box the sun's sweep or the contact reach can cross, the other faces on its plane (the blur reads
+-- their coverage), the lights and the settings. Keyed by exactly those, a small edit misses only the
+-- faces that edit can reach, and the whole-bake cache still short circuits a load that changed nothing.
+Bake.faceCache, Bake.faceCachePrev = {}, {}
+
+local MOD32 = 4294967296
+
+-- Order independent, so the key does not move when the brush list is rebuilt in a different order.
+local function Combine(hash, h)
+	return (hash + h) % MOD32
+end
+
+local function BrushesInBox(brushHashes, mins, maxs, margin)
+	local list, count = TBMap.Brushes.Near(mins, maxs, margin)
+	local hash = 0
+
+	for i = 1, count do
+		hash = Combine(hash, brushHashes[list[i]] or 0)
+	end
+
+	return hash
+end
+
+local function FaceSelfHash(plan)
+	local s = plan.s
+	local poly = plan.face.poly
+	local parts = {}
+
+	for i = 1, #poly do
+		local v = poly[i]
+		parts[#parts + 1] = string.format("%.3f,%.3f,%.3f;", v.x, v.y, v.z)
+	end
+
+	parts[#parts + 1] = string.format("%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%d,%d;%d;%.3f",
+		s.normal.x, s.normal.y, s.normal.z, s.t1.x, s.t1.y, s.t1.z, s.t2.x, s.t2.y, s.t2.z,
+		s.width, s.height, s.margin, s.unit)
+
+	local pieces, pieceCount = plan.pieces, plan.pieceCount or 0
+
+	for p = 1, pieceCount do
+		local qu, qw, qn = pieces[p].u, pieces[p].w, pieces[p].n
+
+		for i = 1, qn do
+			parts[#parts + 1] = string.format("%.3f,%.3f;", qu[i], qw[i])
+		end
+	end
+
+	return util.CRC(table.concat(parts))
+end
+
+-- The brushes whose box can matter to this face: the sun's sweep from the face's grid to the far side of
+-- the map, and the contact reach around the face. A brush outside both can neither shadow nor press on
+-- it, so a change to it leaves this face's key alone.
+local function FaceDepKey(plan, s, pad, pcols, prows, sunDir, brushHashes, planeHash, baseKey, far)
+	local face = plan.face
+	local fmin, fmax = face.tbMins, face.tbMaxs
+
+	if not fmin then fmin, fmax = TBMap.PolyBox(face.poly) end
+
+	local minx, miny, minz = fmin.x, fmin.y, fmin.z
+	local maxx, maxy, maxz = fmax.x, fmax.y, fmax.z
+
+	if sunDir then
+		local ox, oy, oz = s.origin.x, s.origin.y, s.origin.z
+
+		for ci = 0, 1 do
+			local u = s.uStart + ((ci == 0 and 0 or pcols - 1) - pad + 0.5) * s.unit
+
+			for ri = 0, 1 do
+				local w = s.vStart + ((ri == 0 and 0 or prows - 1) - pad + 0.5) * s.unit
+				local x = ox + s.t1.x * u + s.t2.x * w
+				local y = oy + s.t1.y * u + s.t2.y * w
+				local z = oz + s.t1.z * u + s.t2.z * w
+				local reach = far - (x * sunDir.x + y * sunDir.y + z * sunDir.z)
+				local ex = x + sunDir.x * reach
+				local ey = y + sunDir.y * reach
+				local ez = z + sunDir.z * reach
+
+				minx = math.min(minx, x, ex)
+				miny = math.min(miny, y, ey)
+				minz = math.min(minz, z, ez)
+				maxx = math.max(maxx, x, ex)
+				maxy = math.max(maxy, y, ey)
+				maxz = math.max(maxz, z, ez)
+			end
+		end
+	end
+
+	local hash = Combine(plan.depFace or 0, planeHash[plan.planeKey] or 0)
+
+	hash = Combine(hash, BrushesInBox(brushHashes, Vector(minx, miny, minz), Vector(maxx, maxy, maxz), 0))
+	hash = Combine(hash, BrushesInBox(brushHashes, fmin, fmax, cfg.CreaseWidth))
+
+	return string.format("%08x", util.CRC(string.format("%s|%.0f", baseKey, hash)))
+end
+
+local function LightsString()
+	local parts = {}
+
+	for _, light in ipairs((TBMap.World or {}).Lights or {}) do
+		local dir, pos, colour, ambient = light.dir, light.pos, light.color, light.ambient
+
+		parts[#parts + 1] = string.format(
+			"%s;%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%.4f,%.4f,%.4f;%.4f;%.3f;%.5f;%.5f;%.4f,%.4f,%.4f;",
+			tostring(light.kind),
+			dir and dir.x or 0, dir and dir.y or 0, dir and dir.z or 0,
+			pos and pos.x or 0, pos and pos.y or 0, pos and pos.z or 0,
+			colour and colour.x or 0, colour and colour.y or 0, colour and colour.z or 0,
+			light.brightness or 0, light.radius or 0, light.cosOuter or 0, light.cosInner or 0,
+			ambient and ambient.x or 0, ambient and ambient.y or 0, ambient and ambient.z or 0)
+	end
+
+	return table.concat(parts)
+end
+
 function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 	-- Whatever the caller culled is what is baked: the cull runs on the drawn pieces, and culling whole
 	-- faces again here could drop one that still has a piece drawn, leaving that piece with no rectangle
@@ -684,9 +804,44 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 	Bake.traced, Bake.filled, Bake.small, Bake.blurNodes = 0, 0, 0, 0
 	TBMap.NearCalls, TBMap.NearCandidates = 0, 0
 
+	-- This load's cache is built fresh; last load's is read for hits and dropped when it ends, which
+	-- bounds the memory to two generations and lets a promoted hit survive one edit.
+	Bake.faceCachePrev, Bake.faceCache = Bake.faceCache, {}
+	Bake.faceCacheHits, Bake.faceCacheMisses = 0, 0
+
 	local sunDir = Bake.SunDirection()
 
 	if cfg.EnableSun == false then sunDir = nil end
+
+	-- Lamps occlude through any brush, so a per face bound would have to be the whole map; the cache is
+	-- off while any lamp exists. A sun only map, which is what this is tuned for, keeps it.
+	local anyLamp = false
+
+	for _, light in ipairs((TBMap.World or {}).Lights or {}) do
+		if light.kind ~= "sun" then
+			anyLamp = true
+			break
+		end
+	end
+
+	-- The farthest brush along the sun, so a face's sweep stops at the map rather than the config's
+	-- ceiling. Used only to bound the dependency box, not the rays.
+	local far = -math.huge
+
+	if sunDir then
+		local Trace = TBMap.Trace
+
+		if Trace.root ~= 0 then
+			for mask = 0, 7 do
+				local x = (mask % 2 == 0) and Trace.minx or Trace.maxx
+				local y = (math.floor(mask / 2) % 2 == 0) and Trace.miny or Trace.maxy
+				local z = (math.floor(mask / 4) % 2 == 0) and Trace.minz or Trace.maxz
+				local d = x * sunDir.x + y * sunDir.y + z * sunDir.z
+
+				if d > far then far = d end
+			end
+		end
+	end
 
 	-- The rectangles are all known before any is placed, so the tallest faces can be packed first. A
 	-- shelf is as tall as the tallest face on it, so placing tall faces first is what keeps a sheet from
@@ -875,6 +1030,38 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 		if SysTime() > (TBMap.Bake.sliceDeadline or 0) then coroutine.yield() end
 	end
 
+	-- Per plane, a fold of its faces' own hashes: a neighbour on the plane changes what the blur reads
+	-- across a join, so a face's key has to move when one does. Order independent, since the plan order
+	-- is a sort by height and ties are not promised.
+	local planeHash = {}
+
+	for _, plan in ipairs(plans) do
+		local h = FaceSelfHash(plan)
+		plan.depFace = h
+		planeHash[plan.planeKey] = Combine(planeHash[plan.planeKey] or 0, h)
+	end
+
+	-- One hash a brush, from the same fields LightingKey reads, so a brush that moved has a new hash.
+	local brushHashes = {}
+	local brushList = TBMap.Brushes.list
+	local draws = (TBMap.World and TBMap.World.Draws) or {}
+
+	for i = 1, #brushList do
+		local b = brushList[i]
+		local out = { b.seeThrough and "t" or "s", draws[b.brush] and "1" or "0" }
+		local planes = b.planes
+
+		for p = 1, #planes, 4 do
+			out[#out + 1] = string.format("%.3f,%.3f,%.3f,%.3f",
+				planes[p], planes[p + 1], planes[p + 2], planes[p + 3])
+		end
+
+		brushHashes[i] = util.CRC(table.concat(out, ","))
+	end
+
+	local baseKey = Bake.SettingsString() .. "|" .. LightsString()
+	local faceCacheOn = cfg.FaceCache and not anyLamp
+
 	for index, plan in ipairs(plans) do
 		TBMap.Probe.Start("bake.face")
 		local face = plan.face
@@ -1016,6 +1203,67 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 			end
 
 			TBMap.Probe.Stop("sun.trace")
+		end
+
+		-- Read last load's texels for this face if nothing that can change them changed. The whole-bake
+		-- cache above still catches a load that changed nothing at all; this catches an edit that changed
+		-- some, by baking only the faces the edit can reach.
+		local dep
+
+		if faceCacheOn then
+			dep = FaceDepKey(plan, s, pad, pcols, prows, sunDir, brushHashes, planeHash, baseKey, far)
+
+			local entry = dep and (Bake.faceCache[dep] or Bake.faceCachePrev[dep])
+
+			if entry then
+				local sheet, x, y = Bake.PlaceRect(atlases, s.width, s.height, size)
+
+				if not sheet then
+					if #atlases >= cfg.MaxAtlases then
+						print(string.format("[tbmap] atlas cap reached at %d faces, %d left out",
+							placed, #visible - index + 1))
+						break
+					end
+
+					atlases[#atlases + 1] = { shelfY = 0, shelfH = s.height, nextY = s.height, cursorX = s.width }
+					sheet, x, y = #atlases, 0, 0
+				end
+
+				Bake.faceCache[dep] = entry
+				Bake.faceCacheHits = Bake.faceCacheHits + 1
+				Bake.counts[entry.cover] = Bake.counts[entry.cover] + 1
+
+				if entry.cover == "mixed" then
+					Bake.traced = Bake.traced + entry.nodes
+					Bake.blurNodes = Bake.blurNodes + entry.nodes
+				else
+					Bake.filled = Bake.filled + entry.nodes
+				end
+
+				placed = placed + 1
+				Bake.texels = Bake.texels + s.width * s.height
+
+				blocks[placed] = {
+					tag = Bake.FaceTag(face),
+					sheet = sheet, x = x, y = y,
+					width = s.width, height = s.height,
+					uvs = {},
+					form = entry.form,
+					mix = entry.mix,
+					texels = entry.texels,
+				}
+
+				if index % 500 == 0 then
+					print(string.format("[tbmap] composing: %d of %d faces, %d sheets, %.0f s in",
+						index, #visible, #atlases, SysTime() - started))
+				end
+
+				TBMap.Probe.Stop("bake.face")
+
+				if SysTime() > (TBMap.Bake.sliceDeadline or 0) then coroutine.yield() end
+
+				continue
+			end
 		end
 
 		-- Decided without a ray where a brush's shadow cannot reach: lit at every node or dark at every
@@ -1300,6 +1548,12 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 
 		TBMap.Probe.Stop("bake.write")
 
+		if dep then
+			Bake.faceCache[dep] = { form = form, mix = mix, texels = texels, cover = cover,
+				nodes = pcols * prows }
+			Bake.faceCacheMisses = Bake.faceCacheMisses + 1
+		end
+
 		placed = placed + 1
 		Bake.texels = Bake.texels + s.width * s.height
 
@@ -1330,8 +1584,8 @@ function Bake.ComposeBlocks(faces, unit, margin, size, pieces)
 		if SysTime() > (TBMap.Bake.sliceDeadline or 0) then coroutine.yield() end
 	end
 
-	print(string.format("[tbmap] composed %d of %d faces over %d sheets in %.1f s (%d texels)",
-		placed, #visible, #atlases, SysTime() - started, Bake.texels))
+	print(string.format("[tbmap] composed %d of %d faces over %d sheets in %.1f s (%d texels, %d faces reused)",
+		placed, #visible, #atlases, SysTime() - started, Bake.texels, Bake.faceCacheHits))
 
 	print(string.format(
 		"[tbmap] sun: %d lit, %d dark, %d mixed, %d of 4 texels or less; %d nodes traced, %d filled, %d blurred; near %d calls, %d candidates",
@@ -1404,7 +1658,7 @@ end
 -- a plain value, so one added later is in the key without anyone remembering to put it there. The
 -- tables are left out, because changing those changes the payload this key already covers, or
 -- changes only what is drawn with it.
-local function SettingsString()
+function Bake.SettingsString()
 	-- The live table rather than this file's own local, which is captured at load.
 	local c = TBMap.Config
 	local keys = {}
@@ -1425,7 +1679,7 @@ local function SettingsString()
 end
 
 function Bake.CacheKey(payload)
-	return string.format("%08x", util.CRC(payload .. "|" .. SettingsString()))
+	return string.format("%08x", util.CRC(payload .. "|" .. Bake.SettingsString()))
 end
 
 -- The last few bakes, by the key below. Kept across a reload in this process, which is what makes
@@ -1439,6 +1693,8 @@ end
 function Bake.ClearLightCache()
 	table.Empty(lightCache)
 	table.Empty(lightCacheOrder)
+	table.Empty(Bake.faceCache)
+	table.Empty(Bake.faceCachePrev)
 end
 
 function Bake.StoreLight(key, buffer)
@@ -1460,7 +1716,7 @@ end
 -- and the settings. Materials, texture axes and scales are left out on purpose, since a bake does not
 -- depend on them, so retexturing the same geometry is a cache hit rather than another fourteen seconds.
 function Bake.LightingKey()
-	local parts = { SettingsString() }
+	local parts = { Bake.SettingsString() }
 	local world = TBMap.World or {}
 	local brushes = TBMap.Brushes.list
 	local draws = world.Draws or {}

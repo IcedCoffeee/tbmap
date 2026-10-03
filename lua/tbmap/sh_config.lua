@@ -163,6 +163,9 @@ TBMap.Config = {
 
 	-- Trace shadows in Lua rather than through the engine. Much faster; off only to compare.
 	UseFastTracer = true,
+	-- Reuse a face's baked texels across reloads when nothing that can change them has changed, so a
+	-- small map edit only rebakes the faces that edit can reach. Off to force every face to bake.
+	FaceCache = true,
 	-- Cells along the tracer grid's longest axis. The grid only traces rays now that box queries use the
 	-- brush tree, and a ray crosses fewer cells the coarser it is, so this is coarse; past about half
 	-- this the brushes per cell start to cost more than the cells saved.
